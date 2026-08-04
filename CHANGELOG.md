@@ -16,6 +16,8 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Project rows in the sidebar show what their coding agent is doing: orange when it is waiting on you, green when it has finished and you have not looked yet, and a gear while it works. Focusing the tab clears the mark. Set up with the Claude Code hooks in [`scripts/kero-claude-hook.sh`](scripts/kero-claude-hook.sh); any script can also call `kero +attention`
+
 ## [0.1.44]
 
 - Prevent a rare crash while using the Ctrl-Tab switcher
