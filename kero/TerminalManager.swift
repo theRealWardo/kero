@@ -68,6 +68,8 @@ final class TerminalManager: nonisolated ObservableObject {
     private var settingsObservation: AnyCancellable?
     private var autosaveObservation: AnyCancellable?
     private var terminationObservation: AnyCancellable?
+    private var viewedObservation: AnyCancellable?
+    private var activationObservation: AnyCancellable?
     /// The stable terminal/editor responder displaced by the command palette's
     /// search field. AppKit field editors are deliberately excluded because a
     /// SwiftUI TextField can reuse the same responder for the palette itself.
@@ -168,6 +170,22 @@ final class TerminalManager: nonisolated ObservableObject {
             .sink { _ in
                 TerminalManager.saveAll(captureTerminalHistory: false)
             }
+        // Project, tab, and pane-focus changes all re-publish through the
+        // manager, so this one sink covers every way of reaching a session.
+        // It is delivered asynchronously because `objectWillChange` fires
+        // before the selection has actually moved.
+        viewedObservation = objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.markVisibleSessionsViewed()
+            }
+        // Returning to Kero counts as looking at whatever is on screen, and
+        // no property changes when the app is activated.
+        activationObservation = NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.markVisibleSessionsViewed()
+            }
         // The debounce can swallow changes made just before quitting;
         // capture a final snapshot while the shells are still alive.
         terminationObservation = NotificationCenter.default
@@ -185,6 +203,39 @@ final class TerminalManager: nonisolated ObservableObject {
 
     var selectedSession: TerminalSession? {
         selectedProject?.selectedSession
+    }
+
+    /// Records that the user is looking at the selected tab, which is what
+    /// clears an activity badge from its project's sidebar row.
+    ///
+    /// The conditions mirror `KeroTerminalView`'s notion of effective focus:
+    /// a background window or an inactive app is not somebody reading their
+    /// terminal, and marking those as seen would quietly discard the signal
+    /// the strip exists to carry.
+    private func markVisibleSessionsViewed() {
+        guard NSApp.isActive, window?.isKeyWindow == true,
+              let project = selectedProject
+        else { return }
+
+        let now = Date()
+        var retiredNews = false
+        for session in project.visibleSessions {
+            let display = session.activity.display(
+                lastViewedAt: session.lastViewedAt,
+                attentionAt: session.attentionAt,
+                attentionText: session.attentionText,
+                now: now
+            )
+            if display.kind.isClearedByViewing {
+                retiredNews = true
+            }
+            session.lastViewedAt = now
+        }
+        // `lastViewedAt` is not published — nothing else would repaint the
+        // row that just lost its badge.
+        if retiredNews {
+            SessionStateService.shared.invalidate()
+        }
     }
 
     /// Diff stacks that should remain in the window hierarchy. The selected

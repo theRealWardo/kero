@@ -89,6 +89,36 @@ final class Project: nonisolated ObservableObject, nonisolated Identifiable {
         tabs.first { $0.id == selectedTabID }
     }
 
+    /// Sessions the user can currently see: every pane of the selected tab.
+    /// A split shows its neighbours, so looking at the tab is looking at all
+    /// of them — which is what stops a badge surviving a glance.
+    var visibleSessions: [TerminalSession] {
+        selectedTab?.sessions ?? []
+    }
+
+    /// What the sidebar row shows for this project: the most important state
+    /// across every session in every tab.
+    ///
+    /// A project with one agent finished and another blocked reads as blocked,
+    /// because that is the one that cannot proceed without the user. See
+    /// `SessionActivityKind` for the full order.
+    var activityDisplay: SessionActivityDisplay {
+        let now = Date()
+        var best = SessionActivityDisplay.none
+        for session in sessions {
+            let display = session.activity.display(
+                lastViewedAt: session.lastViewedAt,
+                attentionAt: session.attentionAt,
+                attentionText: session.attentionText,
+                now: now
+            )
+            if display.kind > best.kind {
+                best = display
+            }
+        }
+        return best
+    }
+
     /// Tabs by recency of use, selected first. Tabs not yet selected this
     /// session trail in strip order, so the sequence covers every tab even
     /// before any switching has happened.
