@@ -18,13 +18,33 @@ import Foundation
 /// ``TerminalBackendEvents``, and names no emulator's types itself.
 @MainActor
 final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated Identifiable {
-    nonisolated let id = UUID()
+    /// Assigned in `init` rather than inline: the launch environment carries
+    /// this id to the shell (`KERO_SESSION_ID`), and it has to exist before
+    /// the environment is built.
+    nonisolated let id: UUID
 
     @Published var title: String
     @Published var workingDirectory: String?
     @Published var hasExited = false
     @Published private(set) var commandLifecycle = TerminalCommandLifecycle()
     @Published private(set) var terminalCellSize: CGSize?
+
+    /// What this session's agent is doing, reported by an outside process
+    /// through `SessionStateService`. Sessions republish through their
+    /// project, so setting this updates the sidebar with no further plumbing.
+    @Published var activity: SessionActivity = .none
+
+    /// The last `kero +attention` ping, kept apart from `activity` because it
+    /// is the weakest signal and must never displace a reported state.
+    var attentionAt: Date?
+    var attentionText: String?
+
+    /// When the user last had this session in front of them. Everything the
+    /// sidebar treats as news — a finished agent, a blocked one, an attention
+    /// ping — stops being news once this passes its timestamp. Starts at the
+    /// session's own birth so a state reported before the user ever looked
+    /// still counts as unseen.
+    var lastViewedAt = Date()
 
     /// The emulator driving this session. Fixed for the session's lifetime —
     /// changing the setting only affects terminals opened afterwards.
@@ -52,6 +72,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         commandArguments: [String]? = nil,
         environmentPath: String? = nil
     ) {
+        let sessionID = UUID()
         let directCommand = commandArguments.flatMap { $0.isEmpty ? nil : $0 }
         let shellPath = directCommand?.first ?? Self.loginShell()
         let directory = Self.validWorkingDirectory(initialDirectory)
@@ -69,9 +90,12 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
             arguments: ["-c", script],
             commandLine: "/bin/sh -c \(Self.shellQuote(script))",
             workingDirectory: directory,
-            environment: Self.surfaceEnvironment(pathOverride: environmentPath)
+            environment: Self.surfaceEnvironment(
+                pathOverride: environmentPath, sessionID: sessionID
+            )
         )
 
+        id = sessionID
         self.shellPath = shellPath
         self.backend = backend
         launchWorkingDirectory = directory
@@ -88,6 +112,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
         surface.events = self
         installOverlayScrollbar()
         applyTheme()
+        SessionStateService.shared.register(self)
     }
 
     deinit {
@@ -163,6 +188,7 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
             surface.detach()
             hasExited = true
             removeLaunchArtifacts()
+            SessionStateService.shared.unregister(sessionID: id)
             if notifyExit { onExited?(self) }
         }
     }
@@ -280,7 +306,9 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
 
     // MARK: - Launch
 
-    private static func surfaceEnvironment(pathOverride: String?) -> [String: String] {
+    private static func surfaceEnvironment(
+        pathOverride: String?, sessionID: UUID
+    ) -> [String: String] {
         var environment = [
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
@@ -289,6 +317,14 @@ final class TerminalSession: NSObject, nonisolated ObservableObject, nonisolated
             KeroCLIService.shared.terminalEnvironment,
             uniquingKeysWith: { _, cliValue in cliValue }
         )
+        // Inherited by every descendant of this pane's shell, so a reporter
+        // running several processes down — a coding agent's hook, a build
+        // script — is attributed to this session without walking pids.
+        environment.merge(
+            SessionStateService.shared.terminalEnvironment,
+            uniquingKeysWith: { _, stateValue in stateValue }
+        )
+        environment["KERO_SESSION_ID"] = sessionID.uuidString
         if let pathOverride, !pathOverride.isEmpty {
             environment["PATH"] = pathOverride
         }
