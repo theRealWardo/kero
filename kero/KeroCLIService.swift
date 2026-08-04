@@ -136,6 +136,19 @@ final class KeroCLIService {
             return
         }
 
+        if action == "attention" {
+            // Distributed notifications are observable and forgeable by any
+            // same-user process, so this payload is bounded and sanitized the
+            // same way a state file's is — the token only scopes it to this
+            // launch. The worst a forged one can do is fill a folder icon.
+            guard let sessionID = info["sessionID"] as? String,
+                  let id = UUID(uuidString: sessionID)
+            else { return }
+            let text = (info["text"] as? String).map { String($0.prefix(256)) }
+            SessionStateService.shared.recordAttention(sessionID: id, text: text)
+            return
+        }
+
         guard let id = info["id"] as? String,
               let pidNumber = info["pid"] as? NSNumber
         else { return }

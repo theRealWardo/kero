@@ -150,6 +150,44 @@ private final class AppConnection {
         )
     }
 
+    /// Marks the calling terminal's project in the sidebar.
+    ///
+    /// The session id comes from the environment rather than a pid walk, so a
+    /// script nested arbitrarily deep below the pane's shell still reports as
+    /// that pane. The message is bounded here as well as in the app: a shorter
+    /// wire payload is cheaper to reject than to sanitize.
+    func requestAttention(message: String) throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let sessionID = environment["KERO_SESSION_ID"], !sessionID.isEmpty
+        else {
+            throw CLIError.message(
+                String(localized: "`kero +attention` must be run inside a Kero terminal.")
+            )
+        }
+        var info: [String: Any] = [
+            "token": token,
+            "action": "attention",
+            "sessionID": sessionID,
+        ]
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            info["text"] = String(trimmed.prefix(256))
+        }
+        // Delivered immediately rather than coalesced: the whole point of
+        // this verb is to reach a Kero the user is *not* looking at, and a
+        // background app does not receive ordinary distributed notifications
+        // until it is resumed — by which time the user is already back.
+        DistributedNotificationCenter.default().postNotificationName(
+            notificationName,
+            object: nil,
+            userInfo: info,
+            deliverImmediately: true
+        )
+        // Let the app's main run loop claim the request before this
+        // short-lived process disappears from the invoking terminal.
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+
     func createProject(arguments: [String]) {
         let environment = ProcessInfo.processInfo.environment
         let info: [String: Any] = [
@@ -524,6 +562,7 @@ private func printHelp() {
           kero <command> [arguments...]
           kero +themes [--dark | --light]
           kero +themes --list [--dark | --light]
+          kero +attention [message]
           kero +help
 
         With no arguments, kero creates a project with a normal login shell.
@@ -532,6 +571,11 @@ private func printHelp() {
         +themes browses Kero's themes in the terminal. Moving through the list
         previews the theme across the whole app; Return saves it and Esc
         restores the previous theme.
+
+        +attention marks this terminal's project in the sidebar so a long
+        script can say it wants looking at. The mark clears as soon as you
+        focus the terminal, and anything a coding agent reports about the
+        session takes precedence over it.
         """)
     )
 }
@@ -542,6 +586,13 @@ private func run() throws {
         printHelp()
         return
     }
+    if arguments.first == "+attention" {
+        let message = arguments.dropFirst().joined(separator: " ")
+        let connection = try AppConnection()
+        try connection.requestAttention(message: message)
+        return
+    }
+
     if arguments.first != "+themes" {
         if let command = arguments.first, command.hasPrefix("+") {
             throw CLIError.message(
