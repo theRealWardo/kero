@@ -69,6 +69,11 @@
 	     Appcast feed hosted on Cloudflare R2 (releases.kero.sh); see RELEASING.md. -->
 	<key>SUFeedURL</key>
 	<string>https://releases.kero.sh/appcast.xml</string>
+	<!-- Automatic checks are opt-in: no update traffic and no Sparkle consent
+	     prompt until the user enables checking in Settings. That explicit
+	     choice lands in UserDefaults, which overrides this default. -->
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
 	<key>SUPublicEDKey</key>
 	<string>gv9GLMPjH5yMQkZMFXnoNfHOyL8/7KGzl/jzAqlzZZY=</string>
 </dict>
