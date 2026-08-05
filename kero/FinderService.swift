@@ -9,6 +9,14 @@ import AppKit
 /// Info.plist; AppKit forwards matching service requests to this object.
 @MainActor
 final class KeroApplicationDelegate: NSObject, NSApplicationDelegate {
+    /// Kero manages its own tabs. Native window tabbing adds a Window-menu
+    /// group (Show All Tabs ⇧⌘\, Merge All Windows) whose tab overview fights
+    /// the custom chrome in WindowChrome, so opt out before AppKit builds the
+    /// menu — by `applicationDidFinishLaunching` the first window already exists.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = self
     }
