@@ -101,9 +101,17 @@ final class SidebarProjectListView: NSView {
     private let scrollView = NSScrollView()
     private let content = FlippedView()
     private var rowViews: [SidebarProjectRowView] = []
+    /// Row views by project, so a reorder can carry each view to its new slot
+    /// instead of handing it a different project.
+    private var viewsByID: [UUID: SidebarProjectRowView] = [:]
     private var rows: [Row] = []
     private var fontSize: Double = AppSettings.defaultSidebarFontSize
-    private var draggingProjectID: UUID?
+    private var draggingProjectID: UUID? {
+        didSet {
+            guard draggingProjectID != oldValue else { return }
+            updateDragAppearance()
+        }
+    }
 
     private static let horizontalInset: CGFloat = 8
     private static let topInset: CGFloat = 8
@@ -132,33 +140,51 @@ final class SidebarProjectListView: NSView {
     func configure(rows next: [Row], fontSize: Double) {
         guard next != rows || fontSize != self.fontSize else { return }
         let countChanged = next.count != rows.count
+        // A pure reorder — same projects, different order — is a drag in
+        // progress, and rows slide to their new places instead of jumping.
+        // Anything else (a project opened or closed) settles immediately.
+        let reordered = !countChanged
+            && rows.map(\.id) != next.map(\.id)
+            && Set(rows.map(\.id)) == Set(next.map(\.id))
         rows = next
         self.fontSize = fontSize
 
-        while rowViews.count < next.count {
-            let row = SidebarProjectRowView()
-            row.onSelect = { [weak self] id in self?.select(id) }
-            row.onClose = { [weak self] id in self?.close(id) }
-            row.onRename = { [weak self] id, name in self?.rename(id, to: name) }
-            row.onClearName = { [weak self] id in self?.rename(id, to: nil) }
-            row.onPickDirectory = { [weak self] id in self?.pickDirectory(id) }
-            row.onClearDirectory = { [weak self] id in self?.clearDirectory(id) }
-            row.onDrag = { [weak self] id, point in self?.dragRow(id, to: point) }
-            row.onDragEnded = { [weak self] in self?.endDrag() }
-            content.addSubview(row)
-            rowViews.append(row)
+        // Views follow the project, not the slot. Reusing them by position
+        // would make a reorder swap two rows' *contents* while both frames
+        // stayed put, so there would be nothing for `layoutRows` to animate
+        // and the drag would read as a teleport.
+        var reusable = viewsByID
+        rowViews = next.map { row in
+            if let view = reusable.removeValue(forKey: row.id) { return view }
+            return makeRowView()
         }
-        while rowViews.count > next.count {
-            rowViews.removeLast().removeFromSuperview()
+        for view in reusable.values {
+            view.removeFromSuperview()
         }
+        viewsByID = Dictionary(uniqueKeysWithValues: zip(next.map(\.id), rowViews))
 
         for (view, row) in zip(rowViews, next) {
             view.configure(row: row, fontSize: fontSize)
         }
+        updateDragAppearance()
         if countChanged {
             invalidateIntrinsicContentSize()
         }
-        layoutRows()
+        layoutRows(animated: reordered)
+    }
+
+    private func makeRowView() -> SidebarProjectRowView {
+        let row = SidebarProjectRowView()
+        row.onSelect = { [weak self] id in self?.select(id) }
+        row.onClose = { [weak self] id in self?.close(id) }
+        row.onRename = { [weak self] id, name in self?.rename(id, to: name) }
+        row.onClearName = { [weak self] id in self?.rename(id, to: nil) }
+        row.onPickDirectory = { [weak self] id in self?.pickDirectory(id) }
+        row.onClearDirectory = { [weak self] id in self?.clearDirectory(id) }
+        row.onDrag = { [weak self] id, point in self?.dragRow(id, to: point) }
+        row.onDragEnded = { [weak self] in self?.endDrag() }
+        content.addSubview(row)
+        return row
     }
 
     override func layout() {
@@ -166,14 +192,46 @@ final class SidebarProjectListView: NSView {
         layoutRows()
     }
 
-    private func layoutRows() {
+    /// Longer than the 0.12s the SwiftUI list used. That duration was tuned
+    /// against SwiftUI's spring, which keeps moving after the nominal time is
+    /// up; a flat ease over the same span reads as a snap.
+    private static let reorderDuration: TimeInterval = 0.22
+
+    private func layoutRows(animated: Bool = false) {
         let width = max(0, bounds.width - Self.horizontalInset * 2)
+        var frames: [NSRect] = []
         var y = Self.topInset
         for view in rowViews {
             let height = view.preferredHeight
-            view.frame = NSRect(x: Self.horizontalInset, y: y, width: width, height: height)
+            frames.append(
+                NSRect(x: Self.horizontalInset, y: y, width: width, height: height)
+            )
             y += height + Self.rowSpacing
         }
+
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Self.reorderDuration
+                // Ease out, not in-and-out: the row is already moving when the
+                // swap commits, so an eased *start* reads as hesitation.
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                for (view, frame) in zip(rowViews, frames) where view.frame != frame {
+                    // A view that has never been laid out would fly in from the
+                    // origin; place it directly.
+                    if view.frame.isEmpty {
+                        view.frame = frame
+                    } else {
+                        view.animator().frame = frame
+                    }
+                }
+            }
+        } else {
+            for (view, frame) in zip(rowViews, frames) where view.frame != frame {
+                view.frame = frame
+            }
+        }
+
         let total = max(y - Self.rowSpacing + Self.topInset, 0)
         content.frame = NSRect(
             x: 0, y: 0, width: bounds.width, height: max(total, bounds.height)
@@ -235,23 +293,44 @@ final class SidebarProjectListView: NSView {
 
     // MARK: - Reordering
 
-    /// `point` is in window coordinates; the row under it is the drop target,
-    /// matching the old frame-intersection drag.
+    /// `point` is in window coordinates. The drop target is the row the pointer
+    /// has pushed *past the middle of*, not merely the row it is inside.
+    ///
+    /// Taking the row under the pointer — what the SwiftUI list did — makes the
+    /// two projects trade places every time the pointer crosses the boundary
+    /// between them, so resting on that boundary flickers: the swap moves the
+    /// boundary back under the pointer, which immediately qualifies as a swap
+    /// the other way. Committing only past a row's midpoint means undoing a
+    /// swap costs a full row of travel, so the order settles on its own without
+    /// a debounce — and the delay is spatial, so a deliberate drag never waits.
     private func dragRow(_ id: UUID, to point: NSPoint) {
         draggingProjectID = id
         NSCursor.closedHand.set()
-        let local = content.convert(point, from: nil)
-        guard let targetIndex = rowViews.firstIndex(where: { $0.frame.contains(local) }),
-              targetIndex < rows.count
+        guard let from = rows.firstIndex(where: { $0.id == id }) else { return }
+        let y = content.convert(point, from: nil).y
+        guard let target = rowViews.indices.first(where: { index in
+            let frame = rowViews[index].frame
+            return y >= frame.minY && y < frame.maxY
+        }), target != from
         else { return }
-        let target = rows[targetIndex].id
-        guard target != id else { return }
-        manager?.moveProject(id, to: target)
+        let midpoint = rowViews[target].frame.midY
+        let crossed = target > from ? y > midpoint : y < midpoint
+        guard crossed else { return }
+        manager?.moveProject(id, to: rows[target].id)
     }
 
     private func endDrag() {
         draggingProjectID = nil
         NSCursor.arrow.set()
+    }
+
+    /// Fades the row being dragged, as the SwiftUI list did, so it reads as
+    /// lifted out of the strip rather than as one more row sliding around.
+    private func updateDragAppearance() {
+        for (id, view) in viewsByID {
+            let alpha: CGFloat = id == draggingProjectID ? 0.65 : 1
+            if view.alphaValue != alpha { view.alphaValue = alpha }
+        }
     }
 }
 
